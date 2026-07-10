@@ -219,6 +219,176 @@ app.get("/api/requests", requireAuth, async (req, res) => {
   }
 });
 
+// ─── DELETE /api/requests/:id ─ Delete Request ─────────
+app.delete("/api/requests/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from("requests")
+      .select("client_id, status")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) {
+      console.error("[DELETE] Request not found:", id);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    if (existing.client_id !== req.user.id) {
+      console.error("[DELETE] Unauthorized: user", req.user.id, "tried to delete request", id);
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    if (existing.status !== "En attente") {
+      console.error("[DELETE] Blocked: request", id, "has status", existing.status);
+      return res.status(403).json({ error: "Impossible de supprimer une demande déjà en cours de traitement" });
+    }
+
+    const { error: delErr } = await supabase
+      .from("requests")
+      .delete()
+      .eq("id", id);
+
+    if (delErr) {
+      console.error("[DELETE]", delErr.message);
+      return res.status(500).json({ error: "Erreur lors de la suppression." });
+    }
+
+    console.log("[DELETE] Request", id, "deleted by user", req.user.id);
+    return res.status(200).json({ message: "Demande supprimée avec succès." });
+  } catch (err) {
+    console.error("[DELETE /api/requests/:id]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── PUT /api/requests/:id ─ Edit/Update Request ───────
+app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    console.log("[PUT /api/requests/:id] Body:", req.body);
+    console.log("[PUT /api/requests/:id] Files:", req.files);
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from("requests")
+      .select("client_id, status, documents")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) {
+      console.error("[PUT] Request not found:", id);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    if (existing.client_id !== req.user.id) {
+      console.error("[PUT] Unauthorized: user", req.user.id, "tried to update request", id);
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    if (existing.status !== "En attente") {
+      console.error("[PUT] Blocked: request", id, "has status", existing.status);
+      return res.status(403).json({ error: "Impossible de modifier une demande déjà en cours de traitement" });
+    }
+
+    const {
+      fullName,
+      phone,
+      residenceCountry,
+      pathwayCountry,
+      natureOfRequest,
+      contactType,
+      urgencyLevel,
+      message,
+    } = req.body;
+
+    const updatePayload = {};
+    if (fullName !== undefined) updatePayload.full_name = fullName;
+    if (phone !== undefined) updatePayload.phone = phone;
+    if (residenceCountry !== undefined) updatePayload.residence_country = residenceCountry;
+    if (pathwayCountry !== undefined) updatePayload.pathway_country = pathwayCountry;
+    if (natureOfRequest !== undefined) updatePayload.nature_of_request = natureOfRequest;
+    if (contactType !== undefined) updatePayload.contact_type = contactType;
+    if (urgencyLevel !== undefined) updatePayload.urgency_level = urgencyLevel;
+    if (message !== undefined) updatePayload.message = message;
+
+    if (req.files && req.files.length > 0) {
+      const uploads = req.files.map((f) =>
+        uploadToStorage(f.buffer, f.mimetype, req.user.id, f.originalname),
+      );
+      updatePayload.documents = await Promise.all(uploads);
+    }
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({ error: "Aucun champ à mettre à jour." });
+    }
+
+    const { data: updated, error: updErr } = await supabase
+      .from("requests")
+      .update(updatePayload)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (updErr) {
+      console.error("[PUT]", updErr.message);
+      return res.status(500).json({ error: "Erreur lors de la mise à jour." });
+    }
+
+    console.log("[PUT] Request", id, "updated by user", req.user.id);
+    return res.status(200).json(updated);
+  } catch (err) {
+    if (err instanceof multer.MulterError) {
+      if (err.code === "LIMIT_FILE_SIZE") {
+        return res.status(413).json({ error: "Fichier dépasse la limite de 10 Mo." });
+      }
+      return res.status(400).json({ error: `Erreur d'upload: ${err.message}` });
+    }
+    console.error("[PUT /api/requests/:id]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── POST /api/requests/:id/signal ─ Signal Delay ──────
+app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from("requests")
+      .select("client_id")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) {
+      console.error("[SIGNAL] Request not found:", id);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    if (existing.client_id !== req.user.id) {
+      console.error("[SIGNAL] Unauthorized: user", req.user.id, "tried to signal request", id);
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    const { error: sigErr } = await supabase
+      .from("requests")
+      .update({ is_signaled: true })
+      .eq("id", id);
+
+    if (sigErr) {
+      console.error("[SIGNAL]", sigErr.message);
+      return res.status(500).json({ error: "Erreur lors du signalement." });
+    }
+
+    console.log(`[SIGNAL RECEIVED] Request ${id} signaled by client`);
+    return res.status(200).json({ message: "Retard signalé avec succès aux administrateurs" });
+  } catch (err) {
+    console.error("[POST /api/requests/:id/signal]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
 // ─── GET /api/profile ─ Sync Profile ──────────────────
 app.get("/api/profile", requireAuth, async (req, res) => {
   try {
