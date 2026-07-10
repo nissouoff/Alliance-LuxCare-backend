@@ -111,24 +111,42 @@ app.get("/api/health", (_req, res) => {
 // ─── POST /api/requests ─ Create Coordination Request ─
 app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req, res) => {
   try {
+    console.log("[Backend Received Body]:", req.body);
+    console.log("[Backend Received Files]:", req.files);
+
     const {
-      full_name,
+      fullName,
       phone,
-      residence_country,
-      location,
-      request_nature,
-      contact_type,
-      urgency_level,
-      description,
-      consent,
+      residenceCountry,
+      pathwayCountry,
+      natureOfRequest,
+      contactType,
+      urgencyLevel,
+      message,
     } = req.body;
 
-    if (!full_name || !phone) {
-      return res.status(400).json({ error: "Les champs nom et téléphone sont requis." });
-    }
+    if (!fullName) console.log("Validation failed: fullName is missing");
+    if (!phone) console.log("Validation failed: phone is missing");
+    if (!residenceCountry) console.log("Validation failed: residenceCountry is missing");
+    if (!pathwayCountry) console.log("Validation failed: pathwayCountry is missing");
+    if (!natureOfRequest) console.log("Validation failed: natureOfRequest is missing");
+    if (!contactType) console.log("Validation failed: contactType is missing");
+    if (!urgencyLevel) console.log("Validation failed: urgencyLevel is missing");
+    if (!message) console.log("Validation failed: message is missing");
 
-    if (consent !== "true" && consent !== true) {
-      return res.status(400).json({ error: "Le consentement est obligatoire pour soumettre une demande." });
+    const missingFields = [];
+    if (!fullName) missingFields.push("fullName");
+    if (!phone) missingFields.push("phone");
+    if (!residenceCountry) missingFields.push("residenceCountry");
+    if (!pathwayCountry) missingFields.push("pathwayCountry");
+    if (!natureOfRequest) missingFields.push("natureOfRequest");
+    if (!contactType) missingFields.push("contactType");
+    if (!urgencyLevel) missingFields.push("urgencyLevel");
+    if (!message) missingFields.push("message");
+
+    if (missingFields.length > 0) {
+      console.error("[POST /api/requests] 400 Bad Request — Missing fields:", missingFields.join(", "));
+      return res.status(400).json({ error: `Champs manquants: ${missingFields.join(", ")}` });
     }
 
     let documentUrls = [];
@@ -142,16 +160,15 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
 
     const insertPayload = {
       client_id: req.user.id,
-      full_name: full_name || null,
-      email: req.user.email,
-      phone: phone || null,
-      residence_country: residence_country || null,
-      location: location || null,
-      request_nature: request_nature || null,
-      contact_type: contact_type || null,
-      urgency_level: urgency_level || null,
-      description: description || null,
-      consent: true,
+      user_email: req.user.email,
+      full_name: fullName,
+      phone,
+      residence_country: residenceCountry,
+      pathway_country: pathwayCountry,
+      nature_of_request: natureOfRequest,
+      contact_type: contactType,
+      urgency_level: urgencyLevel,
+      message,
       documents: documentUrls.length > 0 ? documentUrls : null,
       status: "pending",
       current_step: 1,
