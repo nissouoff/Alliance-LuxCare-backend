@@ -7,7 +7,7 @@ import { createClient } from "@supabase/supabase-js";
 
 // ─── Environment Variables ────────────────────────────
 const {
-  PORT = 4000,
+  PORT = 5000,
   NODE_ENV = "development",
   FRONTEND_URL = "http://localhost:3000",
   SUPABASE_URL,
@@ -255,6 +255,6 @@ app.use((err, _req, res, _next) => {
 });
 
 // ─── Start ────────────────────────────────────────────
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Alliance LuxCare] Server running on port ${PORT} (${NODE_ENV})`);
 });
