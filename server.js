@@ -507,6 +507,8 @@ app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
       return res.status(500).json({ error: "Erreur lors de la récupération des demandes." });
     }
 
+    console.log("[ADMIN GET REQUESTS] Raw data:", JSON.stringify(data));
+
     const sorted = (data || []).sort((a, b) => {
       const aIsCritical = a.urgency_level === "critical" ? 0 : 1;
       const bIsCritical = b.urgency_level === "critical" ? 0 : 1;
