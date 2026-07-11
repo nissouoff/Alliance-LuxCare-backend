@@ -607,6 +607,79 @@ app.post("/api/admin/requests/:id/notes", requireAuth, requireAdmin, async (req,
   }
 });
 
+// ─── POST /api/admin/requests/:id/update-dossier ─ Unified Update ─
+app.post("/api/admin/requests/:id/update-dossier", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status, current_step, admin_notes } = req.body;
+
+    const allowedStatuses = ["En attente", "En cours", "Planifié", "Terminé", "Annulé"];
+
+    if (status && !allowedStatuses.includes(status)) {
+      console.error("[UPDATE DOSSIER] Invalid status:", status);
+      return res.status(400).json({
+        error: `Statut invalide. Valeurs acceptées: ${allowedStatuses.join(", ")}`,
+      });
+    }
+
+    let step = null;
+    if (current_step !== undefined && current_step !== null) {
+      step = Number(current_step);
+      if (!Number.isInteger(step) || step < 1 || step > 4) {
+        return res.status(400).json({ error: "current_step doit être un entier entre 1 et 4." });
+      }
+    }
+
+    const updatePayload = {};
+    if (status) updatePayload.status = status;
+    if (step !== null) updatePayload.current_step = step;
+
+    if (admin_notes !== undefined && admin_notes !== null) {
+      if (typeof admin_notes !== "string" || !admin_notes.trim()) {
+        return res.status(400).json({ error: "admin_notes doit être un texte non vide." });
+      }
+
+      const { data: existing, error: fetchErr } = await supabase
+        .from("requests")
+        .select("notes")
+        .eq("id", id)
+        .single();
+
+      if (fetchErr || !existing) {
+        return res.status(404).json({ error: "Demande introuvable." });
+      }
+
+      const timestamp = new Date().toISOString();
+      const entry = `[${timestamp}] ${admin_notes.trim()}`;
+      updatePayload.notes = existing.notes
+        ? `${existing.notes}\n${entry}`
+        : entry;
+    }
+
+    if (Object.keys(updatePayload).length === 0) {
+      return res.status(400).json({ error: "Aucun champ valide fourni pour la mise à jour." });
+    }
+
+    const { data, error } = await supabase
+      .from("requests")
+      .update(updatePayload)
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("[UPDATE DOSSIER]", error?.message);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    console.log(`[UPDATE DOSSIER] Request ${id} updated:`, updatePayload);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("[POST /api/admin/requests/:id/update-dossier]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
 // ─── GET /api/admin/metrics ─ Dashboard Summary Stats ─
 app.get("/api/admin/metrics", requireAuth, requireAdmin, async (req, res) => {
   try {
