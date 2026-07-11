@@ -12,6 +12,7 @@ const {
   FRONTEND_URL = "http://localhost:3000",
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
+  ALLOWED_ADMIN_IPS = "",
 } = process.env;
 
 for (const key of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
@@ -30,6 +31,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 const app = express();
 
 app.use(helmet());
+app.set("trust proxy", true);
 app.use(
   cors({
     origin: FRONTEND_URL,
@@ -74,6 +76,36 @@ async function requireAuth(req, res, next) {
   } catch (err) {
     console.error("[AUTH]", err.message);
     return res.status(401).json({ error: "Échec de l'authentification." });
+  }
+}
+
+// ─── Admin Middleware (role + IP whitelist) ───────────
+async function requireAdmin(req, res, next) {
+  try {
+    const clientIp = req.ip;
+    const allowedIps = ALLOWED_ADMIN_IPS.split(",").map((s) => s.trim()).filter(Boolean);
+
+    if (allowedIps.length > 0 && !allowedIps.includes(clientIp)) {
+      console.error(`[ADMIN IP BLOCKED] IP ${clientIp} rejected`);
+      return res.status(403).json({ error: "Accès refusé depuis cette adresse IP." });
+    }
+
+    const { data, error } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error || data?.role !== "admin") {
+      console.error("[ADMIN ROLE] User", req.user.id, "is not admin");
+      return res.status(403).json({ error: "Privilèges administrateur requis." });
+    }
+
+    console.log(`[ADMIN OK] User ${req.user.id} from IP ${clientIp}`);
+    next();
+  } catch (err) {
+    console.error("[ADMIN MIDDLEWARE]", err.message);
+    return res.status(403).json({ error: "Échec de la vérification administrateur." });
   }
 }
 
@@ -425,6 +457,196 @@ app.get("/api/profile", requireAuth, async (req, res) => {
     return res.json(profile);
   } catch (err) {
     console.error("[GET /api/profile]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ═══════════════════════════════════════════════════════
+//  ADMIN ROUTES
+// ═══════════════════════════════════════════════════════
+
+// ─── GET /api/admin/requests ─ Fetch All Requests ────
+app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("requests")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("[ADMIN GET REQUESTS]", error.message);
+      return res.status(500).json({ error: "Erreur lors de la récupération des demandes." });
+    }
+
+    const sorted = (data || []).sort((a, b) => {
+      const aIsUrgent = a.urgency_level === "Urgences Privées" ? 0 : 1;
+      const bIsUrgent = b.urgency_level === "Urgences Privées" ? 0 : 1;
+      if (aIsUrgent !== bIsUrgent) return aIsUrgent - bIsUrgent;
+      return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
+    });
+
+    console.log(`[ADMIN GET REQUESTS] Fetched ${sorted.length} requests`);
+    return res.status(200).json(sorted);
+  } catch (err) {
+    console.error("[GET /api/admin/requests]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── PUT /api/admin/requests/:id/step ─ Update Step ──
+app.put("/api/admin/requests/:id/step", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { current_step } = req.body;
+
+    if (current_step === undefined || current_step === null) {
+      return res.status(400).json({ error: "Le champ current_step est requis." });
+    }
+
+    const step = Number(current_step);
+    if (!Number.isInteger(step) || step < 1 || step > 4) {
+      return res.status(400).json({ error: "current_step doit être un entier entre 1 et 4." });
+    }
+
+    const { data, error } = await supabase
+      .from("requests")
+      .update({ current_step: step })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("[ADMIN UPDATE STEP]", error?.message);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    console.log(`[ADMIN UPDATE STEP] Request ${id} -> step ${step}`);
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("[PUT /api/admin/requests/:id/step]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── PUT /api/admin/requests/:id/status ─ Update Status ─
+app.put("/api/admin/requests/:id/status", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const allowedStatuses = ["En attente", "En cours", "Validé"];
+
+    if (!status || !allowedStatuses.includes(status)) {
+      console.error("[ADMIN UPDATE STATUS] Invalid status:", status);
+      return res.status(400).json({
+        error: `Statut invalide. Valeurs acceptées: ${allowedStatuses.join(", ")}`,
+      });
+    }
+
+    const { data, error } = await supabase
+      .from("requests")
+      .update({ status })
+      .eq("id", id)
+      .select()
+      .single();
+
+    if (error || !data) {
+      console.error("[ADMIN UPDATE STATUS]", error?.message);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    console.log(`[ADMIN UPDATE STATUS] Request ${id} -> status "${status}"`);
+    return res.status(200).json({ message: "Statut mis à jour avec succès." });
+  } catch (err) {
+    console.error("[PUT /api/admin/requests/:id/status]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── POST /api/admin/requests/:id/notes ─ Add Admin Notes ─
+app.post("/api/admin/requests/:id/notes", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { admin_notes } = req.body;
+
+    if (!admin_notes || typeof admin_notes !== "string" || !admin_notes.trim()) {
+      return res.status(400).json({ error: "Le champ admin_notes (texte) est requis." });
+    }
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from("requests")
+      .select("notes")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) {
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    const timestamp = new Date().toISOString();
+    const entry = `[${timestamp}] ${admin_notes.trim()}`;
+    const updatedNotes = existing.notes
+      ? `${existing.notes}\n${entry}`
+      : entry;
+
+    const { error: updErr } = await supabase
+      .from("requests")
+      .update({ notes: updatedNotes })
+      .eq("id", id);
+
+    if (updErr) {
+      console.error("[ADMIN NOTES]", updErr.message);
+      return res.status(500).json({ error: "Erreur lors de l'ajout des notes." });
+    }
+
+    console.log(`[ADMIN NOTES] Notes added to request ${id}`);
+    return res.status(200).json({ message: "Note interne ajoutée avec succès." });
+  } catch (err) {
+    console.error("[POST /api/admin/requests/:id/notes]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── GET /api/admin/metrics ─ Dashboard Summary Stats ─
+app.get("/api/admin/metrics", requireAuth, requireAdmin, async (req, res) => {
+  try {
+    const [
+      { count: total, error: err1 },
+      { count: pending, error: err2 },
+      { count: urgent, error: err3 },
+      { count: signaled, error: err4 },
+    ] = await Promise.all([
+      supabase.from("requests").select("*", { count: "exact", head: true }),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "En attente"),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("urgency_level", "Urgences Privées"),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("is_signaled", true),
+    ]);
+
+    if (err1 || err2 || err3 || err4) {
+      console.error("[ADMIN METRICS]", { err1, err2, err3, err4 });
+      return res.status(500).json({ error: "Erreur lors du calcul des métriques." });
+    }
+
+    const metrics = {
+      total_active: total,
+      pending_count: pending,
+      urgent_count: urgent,
+      signaled_count: signaled,
+    };
+
+    console.log("[ADMIN METRICS]", metrics);
+    return res.status(200).json(metrics);
+  } catch (err) {
+    console.error("[GET /api/admin/metrics]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
   }
 });
