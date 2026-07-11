@@ -244,14 +244,24 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
   }
 });
 
-// ─── GET /api/requests ─ List Client Requests ─────────
+// ─── GET /api/requests ─ List Requests ────────────────
 app.get("/api/requests", requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("requests")
-      .select("*")
-      .eq("client_id", req.user.id)
-      .order("created_at", { ascending: false });
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", req.user.id)
+      .single();
+
+    const isAdmin = profile?.role === "admin" || profile?.role === "owner";
+
+    let query = supabase.from("requests").select("*");
+
+    if (!isAdmin) {
+      query = query.eq("client_id", req.user.id);
+    }
+
+    const { data, error } = await query.order("created_at", { ascending: false });
 
     if (error) {
       console.error("[DB SELECT]", error.message);
