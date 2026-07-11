@@ -4,6 +4,8 @@ import cors from "cors";
 import helmet from "helmet";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
+import { createServer } from "http";
+import { Server } from "socket.io";
 
 const {
   PORT = 5000,
@@ -57,6 +59,61 @@ const corsOptions = {
 
 app.use(cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
+
+const server = createServer(app);
+
+const io = new Server(server, {
+  cors: {
+    origin: allowedOrigins,
+    credentials: true,
+  },
+});
+
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth?.token;
+    if (!token) {
+      return next(new Error("Auth token required"));
+    }
+
+    const { data, error } = await supabase.auth.getUser(token);
+
+    if (error || !data?.user) {
+      return next(new Error("Invalid or expired token"));
+    }
+
+    socket.data.user = data.user;
+
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", data.user.id)
+      .single();
+
+    socket.data.role = profile?.role || "client";
+
+    next();
+  } catch (err) {
+    next(new Error("Auth failed"));
+  }
+});
+
+io.on("connection", (socket) => {
+  const userId = socket.data.user.id;
+  const role = socket.data.role;
+
+  socket.join(userId);
+  console.log(`[SOCKET] User ${userId} connected (role: ${role})`);
+
+  if (role === "admin") {
+    socket.join("admin");
+    console.log(`[SOCKET] Admin ${userId} joined admin room`);
+  }
+
+  socket.on("disconnect", () => {
+    console.log(`[SOCKET] User ${userId} disconnected`);
+  });
+});
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -257,6 +314,9 @@ app.post("/api/requests", requireAuth, requireClient, upload.array("documents", 
       console.error("[DB INSERT]", dbError.message);
       return res.status(500).json({ error: "Erreur lors de la création de la demande." });
     }
+
+    io.to("admin").emit("request_created", request);
+    console.log("[SOCKET] Emitted request_created to admin room");
 
     return res.status(201).json(request);
   } catch (err) {
@@ -676,6 +736,10 @@ app.patch("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res)
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
+    io.to(data.client_id).emit("request_updated", data);
+    io.to("admin").emit("request_updated", data);
+    console.log(`[SOCKET] Emitted request_updated for ${id} to client ${data.client_id} and admin room`);
+
     console.log(`[ADMIN PATCH] Request ${id} updated:`, updatePayload);
     return res.status(200).json(data);
   } catch (err) {
@@ -785,6 +849,6 @@ app.use((err, _req, res, _next) => {
   return res.status(500).json({ error: "Erreur interne du serveur." });
 });
 
-app.listen(PORT, "0.0.0.0", () => {
+server.listen(PORT, "0.0.0.0", () => {
   console.log(`[Alliance LuxCare] Server running on port ${PORT} (${NODE_ENV})`);
 });
