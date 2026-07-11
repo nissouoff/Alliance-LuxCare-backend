@@ -29,9 +29,19 @@ const app = express();
 
 app.use(helmet());
 app.set("trust proxy", true);
+
+const allowedOrigins = FRONTEND_URL ? FRONTEND_URL.split(",").map((s) => s.trim()).filter(Boolean) : [];
+
 app.use(
   cors({
-    origin: FRONTEND_URL,
+    origin: function (origin, callback) {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("Origin not allowed by CORS"));
+      }
+    },
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
