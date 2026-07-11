@@ -530,7 +530,7 @@ app.get("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res) =
 app.patch("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { status, current_step, admin_notes } = req.body;
+    const { status, current_step, admin_notes, arrival_date, end_date, duration_days, price_eur, payment_status, cancellation_reason, amount_paid, balance_due } = req.body;
     const now = new Date().toISOString();
 
     const allowedStatuses = ["pending", "reviewing", "scheduled", "completed", "cancelled"];
@@ -550,11 +550,36 @@ app.patch("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res)
       }
     }
 
+    const allowedPayments = ["Non payé", "Avance", "Payé"];
+    if (payment_status && !allowedPayments.includes(payment_status)) {
+      return res.status(400).json({
+        error: `payment_status invalide. Valeurs acceptées: ${allowedPayments.join(", ")}`,
+      });
+    }
+
     const updatePayload = { updated_at: now };
     if (status) updatePayload.status = status;
     if (step !== null) updatePayload.current_step = step;
     if (admin_notes !== undefined && admin_notes !== null) {
       updatePayload.admin_notes = typeof admin_notes === "string" ? admin_notes.trim() : admin_notes;
+    }
+    if (arrival_date) updatePayload.arrival_date = arrival_date;
+    if (end_date) updatePayload.end_date = end_date;
+    if (duration_days !== undefined && duration_days !== null) {
+      updatePayload.duration_days = Number(duration_days);
+    }
+    if (price_eur !== undefined && price_eur !== null) {
+      updatePayload.price_eur = Number(price_eur);
+    }
+    if (payment_status) updatePayload.payment_status = payment_status;
+    if (cancellation_reason !== undefined && cancellation_reason !== null) {
+      updatePayload.cancellation_reason = cancellation_reason;
+    }
+    if (amount_paid !== undefined && amount_paid !== null) {
+      updatePayload.amount_paid = Number(amount_paid);
+    }
+    if (balance_due !== undefined && balance_due !== null) {
+      updatePayload.balance_due = Number(balance_due);
     }
 
     const { data, error } = await supabase
