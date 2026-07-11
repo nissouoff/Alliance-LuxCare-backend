@@ -30,23 +30,33 @@ const app = express();
 app.use(helmet());
 app.set("trust proxy", true);
 
-const allowedOrigins = FRONTEND_URL ? FRONTEND_URL.split(",").map((s) => s.trim()).filter(Boolean) : [];
+const rawOrigins = FRONTEND_URL || "";
+const allowedOrigins = rawOrigins.split(",").map((url) => url.trim()).filter(Boolean);
 
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("Origin not allowed by CORS"));
-      }
-    },
-    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-    credentials: true,
-  }),
-);
+if (!allowedOrigins.includes("http://localhost:3000")) {
+  allowedOrigins.push("http://localhost:3000");
+}
+
+console.log("[CORS Configuration] Allowed Origins:", allowedOrigins);
+
+const corsOptions = {
+  origin: function (origin, callback) {
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      console.error(`[CORS Blocked] Origin: ${origin} is not present in allowed list.`);
+      callback(new Error("Not allowed by CORS"));
+    }
+  },
+  credentials: true,
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+  allowedHeaders: ["Content-Type", "Authorization", "X-Requested-With", "Accept"],
+  optionsSuccessStatus: 204,
+};
+
+app.use(cors(corsOptions));
+app.options("*", cors(corsOptions));
 app.use(express.json({ limit: "1mb" }));
 
 const upload = multer({
