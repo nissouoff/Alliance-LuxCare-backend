@@ -142,6 +142,29 @@ async function requireAuth(req, res, next) {
   }
 }
 
+// ─── Client Guard ──────────────────────────────────────
+async function requireClient(req, res, next) {
+  try {
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("role")
+      .eq("id", req.user.id)
+      .single();
+
+    if (profile?.role === "admin") {
+      console.error(`[CLIENT GUARD] Admin user ${req.user.id} blocked from client route ${req.originalUrl}`);
+      return res.status(403).json({
+        error: "Comptes administrateurs non autorisés sur cet endpoint client. Utilisez /api/admin/requests.",
+      });
+    }
+
+    next();
+  } catch (err) {
+    console.error("[CLIENT GUARD]", err.message);
+    return res.status(403).json({ error: "Accès refusé." });
+  }
+}
+
 async function requireAdmin(req, res, next) {
   try {
     const clientIp = req.ip;
@@ -149,8 +172,11 @@ async function requireAdmin(req, res, next) {
 
     if (allowedIps.length > 0 && !allowedIps.includes(clientIp)) {
       console.error(`[ADMIN IP BLOCKED] IP ${clientIp} rejected`);
+      console.log(`[IP Whitelist] Request from ${clientIp}, allowed: false`);
       return res.status(403).json({ error: "Accès refusé depuis cette adresse IP." });
     }
+
+    console.log(`[IP Whitelist] Request from ${clientIp}, allowed: true`);
 
     const { data, error } = await supabase
       .from("profiles")
@@ -180,7 +206,7 @@ app.get("/api/health", (_req, res) => {
 });
 
 // ─── POST /api/requests ─ Create Request ──────────────
-app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req, res) => {
+app.post("/api/requests", requireAuth, requireClient, upload.array("documents", 5), async (req, res) => {
   try {
     console.log("[POST /api/requests] Body:", req.body);
     console.log("[POST /api/requests] Files:", req.files);
@@ -214,6 +240,7 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
 
     const insertPayload = {
       client_id: req.user.id,
+      user_email: req.user.email,
       ...payload,
       documents: documentUrls.length > 0 ? documentUrls : null,
       status: "pending",
@@ -245,23 +272,13 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
 });
 
 // ─── GET /api/requests ─ List Requests ────────────────
-app.get("/api/requests", requireAuth, async (req, res) => {
+app.get("/api/requests", requireAuth, requireClient, async (req, res) => {
   try {
-    const { data: profile } = await supabase
-      .from("profiles")
-      .select("role")
-      .eq("id", req.user.id)
-      .single();
-
-    const isAdmin = profile?.role === "admin" || profile?.role === "owner";
-
-    let query = supabase.from("requests").select("*");
-
-    if (!isAdmin) {
-      query = query.eq("client_id", req.user.id);
-    }
-
-    const { data, error } = await query.order("created_at", { ascending: false });
+    const { data, error } = await supabase
+      .from("requests")
+      .select("*")
+      .eq("client_id", req.user.id)
+      .order("created_at", { ascending: false });
 
     if (error) {
       console.error("[DB SELECT]", error.message);
@@ -276,7 +293,7 @@ app.get("/api/requests", requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/requests/:id ─ Single Request ───────────
-app.get("/api/requests/:id", requireAuth, async (req, res) => {
+app.get("/api/requests/:id", requireAuth, requireClient, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -303,7 +320,7 @@ app.get("/api/requests/:id", requireAuth, async (req, res) => {
 });
 
 // ─── PATCH /api/requests/:id ─ Edit Request ───────────
-app.patch("/api/requests/:id", requireAuth, upload.array("documents", 5), async (req, res) => {
+app.patch("/api/requests/:id", requireAuth, requireClient, upload.array("documents", 5), async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -377,7 +394,7 @@ app.patch("/api/requests/:id", requireAuth, upload.array("documents", 5), async 
 });
 
 // ─── DELETE /api/requests/:id ─ Delete Request ─────────
-app.delete("/api/requests/:id", requireAuth, async (req, res) => {
+app.delete("/api/requests/:id", requireAuth, requireClient, async (req, res) => {
   try {
     const { id } = req.params;
 
@@ -421,7 +438,7 @@ app.delete("/api/requests/:id", requireAuth, async (req, res) => {
 });
 
 // ─── POST /api/requests/:id/signal ─ Flag Request ─────
-app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
+app.post("/api/requests/:id/signal", requireAuth, requireClient, async (req, res) => {
   try {
     const { id } = req.params;
     const now = new Date().toISOString();
@@ -461,7 +478,7 @@ app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
 });
 
 // ─── GET /api/profile ─ Sync Profile ──────────────────
-app.get("/api/profile", requireAuth, async (req, res) => {
+app.get("/api/profile", requireAuth, requireClient, async (req, res) => {
   try {
     let { data: profile, error } = await supabase
       .from("profiles")
@@ -707,6 +724,51 @@ app.get("/api/admin/metrics", requireAuth, requireAdmin, async (req, res) => {
     return res.status(200).json(metrics);
   } catch (err) {
     console.error("[GET /api/admin/metrics]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── GET /api/admin/stats ─ Frontend Stats Alias ──────
+app.get("/api/admin/stats", requireAuth, requireAdmin, async (req, res) => {
+  console.log("[Admin API] Stats endpoint successfully hit");
+  try {
+    const [
+      { count: total, error: err1 },
+      { count: pending, error: err2 },
+      { count: critical, error: err3 },
+      { count: flagged, error: err4 },
+    ] = await Promise.all([
+      supabase.from("requests").select("*", { count: "exact", head: true }),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending"),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("urgency_level", "critical"),
+      supabase
+        .from("requests")
+        .select("*", { count: "exact", head: true })
+        .eq("is_flagged", true),
+    ]);
+
+    if (err1 || err2 || err3 || err4) {
+      console.error("[ADMIN STATS]", { err1, err2, err3, err4 });
+      return res.status(500).json({ error: "Erreur lors du calcul des statistiques." });
+    }
+
+    const stats = {
+      totalRequests: total,
+      pending: pending,
+      critical: critical,
+      flagged: flagged,
+    };
+
+    console.log("[ADMIN STATS]", stats);
+    return res.status(200).json(stats);
+  } catch (err) {
+    console.error("[GET /api/admin/stats]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
   }
 });
