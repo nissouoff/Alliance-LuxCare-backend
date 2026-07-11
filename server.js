@@ -507,9 +507,9 @@ app.get("/api/profile", requireAuth, async (req, res) => {
 // ─── GET /api/admin/requests ─ All Requests ───────────
 app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    const { data: requests, error } = await supabase
       .from("requests")
-      .select("*, client:profiles(id, email, full_name, avatar_url)")
+      .select("*")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -517,9 +517,30 @@ app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
       return res.status(500).json({ error: "Erreur lors de la récupération des demandes." });
     }
 
-    console.log("[ADMIN GET REQUESTS] Raw data:", JSON.stringify(data));
+    const clientIds = [...new Set((requests || []).map((r) => r.client_id).filter(Boolean))];
 
-    const sorted = (data || []).sort((a, b) => {
+    let profileMap = {};
+    if (clientIds.length > 0) {
+      const { data: profiles } = await supabase
+        .from("profiles")
+        .select("id, email, full_name, avatar_url")
+        .in("id", clientIds);
+
+      if (profiles) {
+        for (const p of profiles) {
+          profileMap[p.id] = { id: p.id, email: p.email, full_name: p.full_name, avatar_url: p.avatar_url };
+        }
+      }
+    }
+
+    const enriched = (requests || []).map((r) => ({
+      ...r,
+      client: profileMap[r.client_id] || null,
+    }));
+
+    console.log("[ADMIN GET REQUESTS] Raw data:", JSON.stringify(enriched));
+
+    const sorted = enriched.sort((a, b) => {
       const aIsCritical = a.urgency_level === "critical" ? 0 : 1;
       const bIsCritical = b.urgency_level === "critical" ? 0 : 1;
       if (aIsCritical !== bIsCritical) return aIsCritical - bIsCritical;
@@ -539,18 +560,31 @@ app.get("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res) =
   try {
     const { id } = req.params;
 
-    const { data, error } = await supabase
+    const { data: request, error } = await supabase
       .from("requests")
-      .select("*, client:profiles(id, email, full_name, avatar_url)")
+      .select("*")
       .eq("id", id)
       .single();
 
-    if (error || !data) {
+    if (error || !request) {
       console.error("[ADMIN GET REQUEST] Not found:", id);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
-    return res.status(200).json(data);
+    let client = null;
+    if (request.client_id) {
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("id, email, full_name, avatar_url")
+        .eq("id", request.client_id)
+        .single();
+
+      if (profile) {
+        client = { id: profile.id, email: profile.email, full_name: profile.full_name, avatar_url: profile.avatar_url };
+      }
+    }
+
+    return res.status(200).json({ ...request, client });
   } catch (err) {
     console.error("[GET /api/admin/requests/:id]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
