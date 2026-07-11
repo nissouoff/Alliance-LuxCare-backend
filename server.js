@@ -5,7 +5,6 @@ import helmet from "helmet";
 import multer from "multer";
 import { createClient } from "@supabase/supabase-js";
 
-// ─── Environment Variables ────────────────────────────
 const {
   PORT = 5000,
   NODE_ENV = "development",
@@ -22,12 +21,10 @@ for (const key of ["SUPABASE_URL", "SUPABASE_SERVICE_ROLE_KEY"]) {
   }
 }
 
-// ─── Supabase Admin Client ────────────────────────────
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   auth: { autoRefreshToken: false, persistSession: false },
 });
 
-// ─── Express App ──────────────────────────────────────
 const app = express();
 
 app.use(helmet());
@@ -35,14 +32,13 @@ app.set("trust proxy", true);
 app.use(
   cors({
     origin: FRONTEND_URL,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   }),
 );
 app.use(express.json({ limit: "1mb" }));
 
-// ─── Multer (in-memory, 10 MB per file, max 5 files) ─
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: 10 * 1024 * 1024 },
@@ -55,6 +51,54 @@ const upload = multer({
     }
   },
 });
+
+// ─── Helpers ───────────────────────────────────────────
+
+function mapUrgency(value) {
+  if (value === "Immédiat / Critique") return "critical";
+  if (value === "Urgent") return "high";
+  return "low";
+}
+
+function parseConsent(value) {
+  if (value === true || value === "true") return true;
+  return false;
+}
+
+async function uploadToStorage(buffer, mimetype, userId, originalName) {
+  const ext = originalName.split(".").pop() || "bin";
+  const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
+
+  const { error: uploadErr } = await supabase.storage
+    .from("medical-documents")
+    .upload(path, buffer, { contentType: mimetype, upsert: false });
+
+  if (uploadErr) throw new Error(uploadErr.message);
+
+  const { data: pub } = supabase.storage.from("medical-documents").getPublicUrl(path);
+  if (pub?.publicUrl) return pub.publicUrl;
+
+  const { data: signed, error: signErr } = await supabase.storage
+    .from("medical-documents")
+    .createSignedUrl(path, 60 * 60 * 24 * 7);
+  if (signErr) throw new Error(signErr.message);
+
+  return signed.signedUrl;
+}
+
+function buildClientPayload(body) {
+  return {
+    full_name: body.fullName || null,
+    phone: body.phone || null,
+    residence_country: body.residenceCountry || null,
+    location: body.pathwayCountry || null,
+    request_nature: body.natureOfRequest || null,
+    contact_type: body.contactType || null,
+    urgency_level: mapUrgency(body.urgencyLevel),
+    description: body.message || null,
+    consent: parseConsent(body.consent),
+  };
+}
 
 // ─── Auth Middleware ───────────────────────────────────
 async function requireAuth(req, res, next) {
@@ -79,7 +123,6 @@ async function requireAuth(req, res, next) {
   }
 }
 
-// ─── Admin Middleware (role + IP whitelist) ───────────
 async function requireAdmin(req, res, next) {
   try {
     const clientIp = req.ip;
@@ -109,80 +152,40 @@ async function requireAdmin(req, res, next) {
   }
 }
 
-// ─── Storage Upload Helper ────────────────────────────
-async function uploadToStorage(buffer, mimetype, userId, originalName) {
-  const ext = originalName.split(".").pop() || "bin";
-  const path = `${userId}/${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`;
-
-  const { error: uploadErr } = await supabase.storage
-    .from("medical-documents")
-    .upload(path, buffer, { contentType: mimetype, upsert: false });
-
-  if (uploadErr) throw new Error(uploadErr.message);
-
-  const { data: pub } = supabase.storage.from("medical-documents").getPublicUrl(path);
-  if (pub?.publicUrl) return pub.publicUrl;
-
-  const { data: signed, error: signErr } = await supabase.storage
-    .from("medical-documents")
-    .createSignedUrl(path, 60 * 60 * 24 * 7);
-  if (signErr) throw new Error(signErr.message);
-
-  return signed.signedUrl;
-}
-
 // ═══════════════════════════════════════════════════════
-//  ENDPOINTS
+//  CLIENT ENDPOINTS
 // ═══════════════════════════════════════════════════════
 
-// ─── Health Check ──────────────────────────────────────
 app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", env: NODE_ENV, timestamp: new Date().toISOString() });
 });
 
-// ─── POST /api/requests ─ Create Coordination Request ─
+// ─── POST /api/requests ─ Create Request ──────────────
 app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req, res) => {
   try {
-    console.log("[Backend Received Body]:", req.body);
-    console.log("[Backend Received Files]:", req.files);
+    console.log("[POST /api/requests] Body:", req.body);
+    console.log("[POST /api/requests] Files:", req.files);
 
-    const {
-      fullName,
-      phone,
-      residenceCountry,
-      pathwayCountry,
-      natureOfRequest,
-      contactType,
-      urgencyLevel,
-      message,
-    } = req.body;
-
-    if (!fullName) console.log("Validation failed: fullName is missing");
-    if (!phone) console.log("Validation failed: phone is missing");
-    if (!residenceCountry) console.log("Validation failed: residenceCountry is missing");
-    if (!pathwayCountry) console.log("Validation failed: pathwayCountry is missing");
-    if (!natureOfRequest) console.log("Validation failed: natureOfRequest is missing");
-    if (!contactType) console.log("Validation failed: contactType is missing");
-    if (!urgencyLevel) console.log("Validation failed: urgencyLevel is missing");
-    if (!message) console.log("Validation failed: message is missing");
+    const payload = buildClientPayload(req.body);
 
     const missingFields = [];
-    if (!fullName) missingFields.push("fullName");
-    if (!phone) missingFields.push("phone");
-    if (!residenceCountry) missingFields.push("residenceCountry");
-    if (!pathwayCountry) missingFields.push("pathwayCountry");
-    if (!natureOfRequest) missingFields.push("natureOfRequest");
-    if (!contactType) missingFields.push("contactType");
-    if (!urgencyLevel) missingFields.push("urgencyLevel");
-    if (!message) missingFields.push("message");
+    if (!payload.full_name) missingFields.push("fullName");
+    if (!payload.phone) missingFields.push("phone");
+    if (!payload.location) missingFields.push("pathwayCountry");
+    if (!payload.request_nature) missingFields.push("natureOfRequest");
+    if (!payload.contact_type) missingFields.push("contactType");
+    if (!payload.description) missingFields.push("message");
 
     if (missingFields.length > 0) {
-      console.error("[POST /api/requests] 400 Bad Request — Missing fields:", missingFields.join(", "));
+      console.error("[POST /api/requests] Missing fields:", missingFields.join(", "));
       return res.status(400).json({ error: `Champs manquants: ${missingFields.join(", ")}` });
     }
 
-    let documentUrls = [];
+    if (!payload.consent) {
+      return res.status(400).json({ error: "Le consentement est obligatoire." });
+    }
 
+    let documentUrls = [];
     if (req.files && req.files.length > 0) {
       const uploads = req.files.map((f) =>
         uploadToStorage(f.buffer, f.mimetype, req.user.id, f.originalname),
@@ -192,17 +195,9 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
 
     const insertPayload = {
       client_id: req.user.id,
-      user_email: req.user.email,
-      full_name: fullName,
-      phone,
-      residence_country: residenceCountry,
-      pathway_country: pathwayCountry,
-      nature_of_request: natureOfRequest,
-      contact_type: contactType,
-      urgency_level: urgencyLevel,
-      message,
+      ...payload,
       documents: documentUrls.length > 0 ? documentUrls : null,
-      status: "En attente",
+      status: "pending",
       current_step: 1,
     };
 
@@ -230,7 +225,7 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
   }
 });
 
-// ─── GET /api/requests ─ Fetch Client's Requests ──────
+// ─── GET /api/requests ─ List Client Requests ─────────
 app.get("/api/requests", requireAuth, async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -251,14 +246,10 @@ app.get("/api/requests", requireAuth, async (req, res) => {
   }
 });
 
-// ─── GET /api/requests/:id ─ Fetch Single Request ────
+// ─── GET /api/requests/:id ─ Single Request ───────────
 app.get("/api/requests/:id", requireAuth, async (req, res) => {
   try {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id < 1) {
-      return res.status(400).json({ error: "ID de demande invalide." });
-    }
+    const { id } = req.params;
 
     const { data, error } = await supabase
       .from("requests")
@@ -267,12 +258,11 @@ app.get("/api/requests/:id", requireAuth, async (req, res) => {
       .single();
 
     if (error || !data) {
-      console.error("[GET /api/requests/:id] Request not found:", id);
+      console.error("[GET /api/requests/:id] Not found:", id);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
     if (data.client_id !== req.user.id) {
-      console.error("[GET /api/requests/:id] Unauthorized: user", req.user.id);
       return res.status(403).json({ error: "Accès refusé." });
     }
 
@@ -283,14 +273,13 @@ app.get("/api/requests/:id", requireAuth, async (req, res) => {
   }
 });
 
-// ─── DELETE /api/requests/:id ─ Delete Request ─────────
-app.delete("/api/requests/:id", requireAuth, async (req, res) => {
+// ─── PATCH /api/requests/:id ─ Edit Request ───────────
+app.patch("/api/requests/:id", requireAuth, upload.array("documents", 5), async (req, res) => {
   try {
-    const id = Number(req.params.id);
+    const { id } = req.params;
 
-    if (!Number.isInteger(id) || id < 1) {
-      return res.status(400).json({ error: "ID de demande invalide." });
-    }
+    console.log("[PATCH /api/requests/:id] Body:", req.body);
+    console.log("[PATCH /api/requests/:id] Files:", req.files);
 
     const { data: existing, error: fetchErr } = await supabase
       .from("requests")
@@ -299,92 +288,27 @@ app.delete("/api/requests/:id", requireAuth, async (req, res) => {
       .single();
 
     if (fetchErr || !existing) {
-      console.error("[DELETE] Request not found:", id);
+      console.error("[PATCH] Not found:", id);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
     if (existing.client_id !== req.user.id) {
-      console.error("[DELETE] Unauthorized: user", req.user.id, "tried to delete request", id);
       return res.status(403).json({ error: "Accès refusé." });
     }
 
-    if (existing.status !== "En attente" && existing.status !== "Annulé") {
-      console.error("[DELETE] Blocked: request", id, "has status", existing.status);
-      return res.status(403).json({ error: "Impossible de supprimer une demande déjà en cours de traitement" });
-    }
-
-    const { error: delErr } = await supabase
-      .from("requests")
-      .delete()
-      .eq("id", id);
-
-    if (delErr) {
-      console.error("[DELETE]", delErr.message);
-      return res.status(500).json({ error: "Erreur lors de la suppression." });
-    }
-
-    console.log("[DELETE] Request", id, "deleted by user", req.user.id);
-    return res.status(200).json({ message: "Demande supprimée avec succès." });
-  } catch (err) {
-    console.error("[DELETE /api/requests/:id]", err.message);
-    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
-  }
-});
-
-// ─── PUT /api/requests/:id ─ Edit/Update Request ───────
-app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (req, res) => {
-  try {
-    const id = Number(req.params.id);
-
-    if (!Number.isInteger(id) || id < 1) {
-      return res.status(400).json({ error: "ID de demande invalide." });
-    }
-
-    console.log("[PUT /api/requests/:id] Body:", req.body);
-    console.log("[PUT /api/requests/:id] Files:", req.files);
-
-    const { data: existing, error: fetchErr } = await supabase
-      .from("requests")
-      .select("client_id, status, documents")
-      .eq("id", id)
-      .single();
-
-    if (fetchErr || !existing) {
-      console.error("[PUT] Request not found:", id);
-      return res.status(404).json({ error: "Demande introuvable." });
-    }
-
-    if (existing.client_id !== req.user.id) {
-      console.error("[PUT] Unauthorized: user", req.user.id, "tried to update request", id);
-      return res.status(403).json({ error: "Accès refusé." });
-    }
-
-    const editable = existing.status === "En attente" || existing.status === "pending";
-    if (!editable) {
-      console.error("[PUT] Blocked: request", id, "has status", existing.status);
+    if (existing.status !== "pending" && existing.status !== "cancelled") {
+      console.error("[PATCH] Blocked: request", id, "has status", existing.status);
       return res.status(403).json({ error: "Impossible de modifier une demande déjà en cours de traitement" });
     }
 
-    const {
-      fullName,
-      phone,
-      residenceCountry,
-      pathwayCountry,
-      natureOfRequest,
-      contactType,
-      urgencyLevel,
-      message,
-    } = req.body;
+    const payload = buildClientPayload(req.body);
 
     const updatePayload = {};
-    if (fullName !== undefined) updatePayload.full_name = fullName;
-    if (phone !== undefined) updatePayload.phone = phone;
-    if (residenceCountry !== undefined) updatePayload.residence_country = residenceCountry;
-    if (pathwayCountry !== undefined) updatePayload.pathway_country = pathwayCountry;
-    if (natureOfRequest !== undefined) updatePayload.nature_of_request = natureOfRequest;
-    if (contactType !== undefined) updatePayload.contact_type = contactType;
-    if (urgencyLevel !== undefined) updatePayload.urgency_level = urgencyLevel;
-    if (message !== undefined) updatePayload.message = message;
+    for (const [key, value] of Object.entries(payload)) {
+      if (value !== null && value !== undefined) {
+        updatePayload[key] = value;
+      }
+    }
 
     if (req.files && req.files.length > 0) {
       const uploads = req.files.map((f) =>
@@ -405,11 +329,11 @@ app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (r
       .single();
 
     if (updErr) {
-      console.error("[PUT]", updErr.message);
+      console.error("[PATCH]", updErr.message);
       return res.status(500).json({ error: "Erreur lors de la mise à jour." });
     }
 
-    console.log("[PUT] Request", id, "updated by user", req.user.id);
+    console.log("[PATCH] Request", id, "updated");
     return res.status(200).json(updated);
   } catch (err) {
     if (err instanceof multer.MulterError) {
@@ -418,15 +342,60 @@ app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (r
       }
       return res.status(400).json({ error: `Erreur d'upload: ${err.message}` });
     }
-    console.error("[PUT /api/requests/:id]", err.message);
+    console.error("[PATCH /api/requests/:id]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
   }
 });
 
-// ─── POST /api/requests/:id/signal ─ Signal Delay ──────
+// ─── DELETE /api/requests/:id ─ Delete Request ─────────
+app.delete("/api/requests/:id", requireAuth, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { data: existing, error: fetchErr } = await supabase
+      .from("requests")
+      .select("client_id, status")
+      .eq("id", id)
+      .single();
+
+    if (fetchErr || !existing) {
+      console.error("[DELETE] Not found:", id);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    if (existing.client_id !== req.user.id) {
+      console.error("[DELETE] Unauthorized user", req.user.id, "for request", id);
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    if (existing.status !== "pending" && existing.status !== "cancelled") {
+      console.error("[DELETE] Blocked: request", id, "has status", existing.status);
+      return res.status(403).json({ error: "Impossible de supprimer une demande déjà en cours de traitement" });
+    }
+
+    const { error: delErr } = await supabase
+      .from("requests")
+      .delete()
+      .eq("id", id);
+
+    if (delErr) {
+      console.error("[DELETE]", delErr.message);
+      return res.status(500).json({ error: "Erreur lors de la suppression." });
+    }
+
+    console.log("[DELETE] Request", id, "deleted");
+    return res.status(200).json({ message: "Demande supprimée avec succès." });
+  } catch (err) {
+    console.error("[DELETE /api/requests/:id]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
+// ─── POST /api/requests/:id/signal ─ Flag Request ─────
 app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
   try {
     const { id } = req.params;
+    const now = new Date().toISOString();
 
     const { data: existing, error: fetchErr } = await supabase
       .from("requests")
@@ -435,18 +404,18 @@ app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
       .single();
 
     if (fetchErr || !existing) {
-      console.error("[SIGNAL] Request not found:", id);
+      console.error("[SIGNAL] Not found:", id);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
     if (existing.client_id !== req.user.id) {
-      console.error("[SIGNAL] Unauthorized: user", req.user.id, "tried to signal request", id);
+      console.error("[SIGNAL] Unauthorized user", req.user.id, "for request", id);
       return res.status(403).json({ error: "Accès refusé." });
     }
 
     const { error: sigErr } = await supabase
       .from("requests")
-      .update({ is_signaled: true })
+      .update({ is_flagged: true, flagged_at: now, updated_at: now })
       .eq("id", id);
 
     if (sigErr) {
@@ -454,7 +423,7 @@ app.post("/api/requests/:id/signal", requireAuth, async (req, res) => {
       return res.status(500).json({ error: "Erreur lors du signalement." });
     }
 
-    console.log(`[SIGNAL RECEIVED] Request ${id} signaled by client`);
+    console.log(`[SIGNAL RECEIVED] Request ${id} flagged by client`);
     return res.status(200).json({ message: "Retard signalé avec succès aux administrateurs" });
   } catch (err) {
     console.error("[POST /api/requests/:id/signal]", err.message);
@@ -503,15 +472,15 @@ app.get("/api/profile", requireAuth, async (req, res) => {
 });
 
 // ═══════════════════════════════════════════════════════
-//  ADMIN ROUTES
+//  ADMIN ENDPOINTS
 // ═══════════════════════════════════════════════════════
 
-// ─── GET /api/admin/requests ─ Fetch All Requests ────
+// ─── GET /api/admin/requests ─ All Requests ───────────
 app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { data, error } = await supabase
       .from("requests")
-      .select("*")
+      .select("*, client:profiles(id, email, full_name, avatar_url)")
       .order("created_at", { ascending: false });
 
     if (error) {
@@ -520,9 +489,9 @@ app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
     }
 
     const sorted = (data || []).sort((a, b) => {
-      const aIsUrgent = a.urgency_level === "Urgences Privées" ? 0 : 1;
-      const bIsUrgent = b.urgency_level === "Urgences Privées" ? 0 : 1;
-      if (aIsUrgent !== bIsUrgent) return aIsUrgent - bIsUrgent;
+      const aIsCritical = a.urgency_level === "critical" ? 0 : 1;
+      const bIsCritical = b.urgency_level === "critical" ? 0 : 1;
+      if (aIsCritical !== bIsCritical) return aIsCritical - bIsCritical;
       return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
     });
 
@@ -534,130 +503,40 @@ app.get("/api/admin/requests", requireAuth, requireAdmin, async (req, res) => {
   }
 });
 
-// ─── PUT /api/admin/requests/:id/step ─ Update Step ──
-app.put("/api/admin/requests/:id/step", requireAuth, requireAdmin, async (req, res) => {
+// ─── GET /api/admin/requests/:id ─ Single Request ─────
+app.get("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
-    const { current_step } = req.body;
-
-    if (current_step === undefined || current_step === null) {
-      return res.status(400).json({ error: "Le champ current_step est requis." });
-    }
-
-    const step = Number(current_step);
-    if (!Number.isInteger(step) || step < 1 || step > 4) {
-      return res.status(400).json({ error: "current_step doit être un entier entre 1 et 4." });
-    }
 
     const { data, error } = await supabase
       .from("requests")
-      .update({ current_step: step })
+      .select("*, client:profiles(id, email, full_name, avatar_url)")
       .eq("id", id)
-      .select()
       .single();
 
     if (error || !data) {
-      console.error("[ADMIN UPDATE STEP]", error?.message);
+      console.error("[ADMIN GET REQUEST] Not found:", id);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
-    console.log(`[ADMIN UPDATE STEP] Request ${id} -> step ${step}`);
     return res.status(200).json(data);
   } catch (err) {
-    console.error("[PUT /api/admin/requests/:id/step]", err.message);
+    console.error("[GET /api/admin/requests/:id]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
   }
 });
 
-// ─── PUT /api/admin/requests/:id/status ─ Update Status ─
-app.put("/api/admin/requests/:id/status", requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-
-    const allowedStatuses = ["En attente", "En cours", "Validé"];
-
-    if (!status || !allowedStatuses.includes(status)) {
-      console.error("[ADMIN UPDATE STATUS] Invalid status:", status);
-      return res.status(400).json({
-        error: `Statut invalide. Valeurs acceptées: ${allowedStatuses.join(", ")}`,
-      });
-    }
-
-    const { data, error } = await supabase
-      .from("requests")
-      .update({ status })
-      .eq("id", id)
-      .select()
-      .single();
-
-    if (error || !data) {
-      console.error("[ADMIN UPDATE STATUS]", error?.message);
-      return res.status(404).json({ error: "Demande introuvable." });
-    }
-
-    console.log(`[ADMIN UPDATE STATUS] Request ${id} -> status "${status}"`);
-    return res.status(200).json({ message: "Statut mis à jour avec succès." });
-  } catch (err) {
-    console.error("[PUT /api/admin/requests/:id/status]", err.message);
-    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
-  }
-});
-
-// ─── POST /api/admin/requests/:id/notes ─ Add Admin Notes ─
-app.post("/api/admin/requests/:id/notes", requireAuth, requireAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { admin_notes } = req.body;
-
-    if (!admin_notes || typeof admin_notes !== "string" || !admin_notes.trim()) {
-      return res.status(400).json({ error: "Le champ admin_notes (texte) est requis." });
-    }
-
-    const { data: existing, error: fetchErr } = await supabase
-      .from("requests")
-      .select("notes")
-      .eq("id", id)
-      .single();
-
-    if (fetchErr || !existing) {
-      return res.status(404).json({ error: "Demande introuvable." });
-    }
-
-    const timestamp = new Date().toISOString();
-    const entry = `[${timestamp}] ${admin_notes.trim()}`;
-    const updatedNotes = existing.notes
-      ? `${existing.notes}\n${entry}`
-      : entry;
-
-    const { error: updErr } = await supabase
-      .from("requests")
-      .update({ notes: updatedNotes })
-      .eq("id", id);
-
-    if (updErr) {
-      console.error("[ADMIN NOTES]", updErr.message);
-      return res.status(500).json({ error: "Erreur lors de l'ajout des notes." });
-    }
-
-    console.log(`[ADMIN NOTES] Notes added to request ${id}`);
-    return res.status(200).json({ message: "Note interne ajoutée avec succès." });
-  } catch (err) {
-    console.error("[POST /api/admin/requests/:id/notes]", err.message);
-    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
-  }
-});
-
-// ─── POST /api/admin/requests/:id/update-dossier ─ Unified Update ─
-app.post("/api/admin/requests/:id/update-dossier", requireAuth, requireAdmin, async (req, res) => {
+// ─── PATCH /api/admin/requests/:id ─ Admin Update ─────
+app.patch("/api/admin/requests/:id", requireAuth, requireAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status, current_step, admin_notes } = req.body;
+    const now = new Date().toISOString();
 
-    const allowedStatuses = ["En attente", "En cours", "Planifié", "Terminé", "Annulé"];
+    const allowedStatuses = ["pending", "reviewing", "scheduled", "completed", "cancelled"];
 
     if (status && !allowedStatuses.includes(status)) {
-      console.error("[UPDATE DOSSIER] Invalid status:", status);
+      console.error("[ADMIN PATCH] Invalid status:", status);
       return res.status(400).json({
         error: `Statut invalide. Valeurs acceptées: ${allowedStatuses.join(", ")}`,
       });
@@ -671,34 +550,11 @@ app.post("/api/admin/requests/:id/update-dossier", requireAuth, requireAdmin, as
       }
     }
 
-    const updatePayload = {};
+    const updatePayload = { updated_at: now };
     if (status) updatePayload.status = status;
     if (step !== null) updatePayload.current_step = step;
-
     if (admin_notes !== undefined && admin_notes !== null) {
-      if (typeof admin_notes !== "string" || !admin_notes.trim()) {
-        return res.status(400).json({ error: "admin_notes doit être un texte non vide." });
-      }
-
-      const { data: existing, error: fetchErr } = await supabase
-        .from("requests")
-        .select("notes")
-        .eq("id", id)
-        .single();
-
-      if (fetchErr || !existing) {
-        return res.status(404).json({ error: "Demande introuvable." });
-      }
-
-      const timestamp = new Date().toISOString();
-      const entry = `[${timestamp}] ${admin_notes.trim()}`;
-      updatePayload.notes = existing.notes
-        ? `${existing.notes}\n${entry}`
-        : entry;
-    }
-
-    if (Object.keys(updatePayload).length === 0) {
-      return res.status(400).json({ error: "Aucun champ valide fourni pour la mise à jour." });
+      updatePayload.admin_notes = typeof admin_notes === "string" ? admin_notes.trim() : admin_notes;
     }
 
     const { data, error } = await supabase
@@ -709,40 +565,40 @@ app.post("/api/admin/requests/:id/update-dossier", requireAuth, requireAdmin, as
       .single();
 
     if (error || !data) {
-      console.error("[UPDATE DOSSIER]", error?.message);
+      console.error("[ADMIN PATCH]", error?.message);
       return res.status(404).json({ error: "Demande introuvable." });
     }
 
-    console.log(`[UPDATE DOSSIER] Request ${id} updated:`, updatePayload);
+    console.log(`[ADMIN PATCH] Request ${id} updated:`, updatePayload);
     return res.status(200).json(data);
   } catch (err) {
-    console.error("[POST /api/admin/requests/:id/update-dossier]", err.message);
+    console.error("[PATCH /api/admin/requests/:id]", err.message);
     return res.status(500).json({ error: "Une erreur inattendue est survenue." });
   }
 });
 
-// ─── GET /api/admin/metrics ─ Dashboard Summary Stats ─
+// ─── GET /api/admin/metrics ─ Dashboard Stats ─────────
 app.get("/api/admin/metrics", requireAuth, requireAdmin, async (req, res) => {
   try {
     const [
       { count: total, error: err1 },
       { count: pending, error: err2 },
-      { count: urgent, error: err3 },
-      { count: signaled, error: err4 },
+      { count: critical, error: err3 },
+      { count: flagged, error: err4 },
     ] = await Promise.all([
       supabase.from("requests").select("*", { count: "exact", head: true }),
       supabase
         .from("requests")
         .select("*", { count: "exact", head: true })
-        .eq("status", "En attente"),
+        .eq("status", "pending"),
       supabase
         .from("requests")
         .select("*", { count: "exact", head: true })
-        .eq("urgency_level", "Urgences Privées"),
+        .eq("urgency_level", "critical"),
       supabase
         .from("requests")
         .select("*", { count: "exact", head: true })
-        .eq("is_signaled", true),
+        .eq("is_flagged", true),
     ]);
 
     if (err1 || err2 || err3 || err4) {
@@ -753,8 +609,8 @@ app.get("/api/admin/metrics", requireAuth, requireAdmin, async (req, res) => {
     const metrics = {
       total_active: total,
       pending_count: pending,
-      urgent_count: urgent,
-      signaled_count: signaled,
+      critical_count: critical,
+      flagged_count: flagged,
     };
 
     console.log("[ADMIN METRICS]", metrics);
@@ -777,7 +633,6 @@ app.use((err, _req, res, _next) => {
   return res.status(500).json({ error: "Erreur interne du serveur." });
 });
 
-// ─── Start ────────────────────────────────────────────
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`[Alliance LuxCare] Server running on port ${PORT} (${NODE_ENV})`);
 });
