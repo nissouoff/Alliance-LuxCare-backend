@@ -202,7 +202,7 @@ app.post("/api/requests", requireAuth, upload.array("documents", 5), async (req,
       urgency_level: urgencyLevel,
       message,
       documents: documentUrls.length > 0 ? documentUrls : null,
-      status: "pending",
+      status: "En attente",
       current_step: 1,
     };
 
@@ -251,10 +251,46 @@ app.get("/api/requests", requireAuth, async (req, res) => {
   }
 });
 
+// ─── GET /api/requests/:id ─ Fetch Single Request ────
+app.get("/api/requests/:id", requireAuth, async (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: "ID de demande invalide." });
+    }
+
+    const { data, error } = await supabase
+      .from("requests")
+      .select("*")
+      .eq("id", id)
+      .single();
+
+    if (error || !data) {
+      console.error("[GET /api/requests/:id] Request not found:", id);
+      return res.status(404).json({ error: "Demande introuvable." });
+    }
+
+    if (data.client_id !== req.user.id) {
+      console.error("[GET /api/requests/:id] Unauthorized: user", req.user.id);
+      return res.status(403).json({ error: "Accès refusé." });
+    }
+
+    return res.json(data);
+  } catch (err) {
+    console.error("[GET /api/requests/:id]", err.message);
+    return res.status(500).json({ error: "Une erreur inattendue est survenue." });
+  }
+});
+
 // ─── DELETE /api/requests/:id ─ Delete Request ─────────
 app.delete("/api/requests/:id", requireAuth, async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: "ID de demande invalide." });
+    }
 
     const { data: existing, error: fetchErr } = await supabase
       .from("requests")
@@ -272,7 +308,7 @@ app.delete("/api/requests/:id", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Accès refusé." });
     }
 
-    if (existing.status !== "En attente") {
+    if (existing.status !== "En attente" && existing.status !== "Annulé") {
       console.error("[DELETE] Blocked: request", id, "has status", existing.status);
       return res.status(403).json({ error: "Impossible de supprimer une demande déjà en cours de traitement" });
     }
@@ -298,7 +334,11 @@ app.delete("/api/requests/:id", requireAuth, async (req, res) => {
 // ─── PUT /api/requests/:id ─ Edit/Update Request ───────
 app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (req, res) => {
   try {
-    const { id } = req.params;
+    const id = Number(req.params.id);
+
+    if (!Number.isInteger(id) || id < 1) {
+      return res.status(400).json({ error: "ID de demande invalide." });
+    }
 
     console.log("[PUT /api/requests/:id] Body:", req.body);
     console.log("[PUT /api/requests/:id] Files:", req.files);
@@ -319,7 +359,8 @@ app.put("/api/requests/:id", requireAuth, upload.array("documents", 5), async (r
       return res.status(403).json({ error: "Accès refusé." });
     }
 
-    if (existing.status !== "En attente") {
+    const editable = existing.status === "En attente" || existing.status === "pending";
+    if (!editable) {
       console.error("[PUT] Blocked: request", id, "has status", existing.status);
       return res.status(403).json({ error: "Impossible de modifier une demande déjà en cours de traitement" });
     }
